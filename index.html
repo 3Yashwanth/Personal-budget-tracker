@@ -53,7 +53,7 @@
 
         <footer class="mt-8 text-center text-sm text-gray-400">
             <p>User ID: <span id="user-id-display" class="font-mono text-xs"></span></p>
-            <p>Data stored in Firestore under App ID: <span id="app-id-display"></span></p>
+            <p>App ID: <span id="app-id-display"></span></p>
         </footer>
     </div>
 
@@ -67,10 +67,31 @@
         // Enable Firestore Debug Logging
         setLogLevel('Debug');
 
+        // --- MANUAL CONFIGURATION FOR GITHUB HOSTING ---
+        // When running outside the sandbox (like on GitHub Pages), the __variables are not defined.
+        // We set up dummy values here.
+        
+        // NOTE: You MUST replace this with your real Firebase config object if you want data to persist 
+        // across browser sessions and across different computers/devices.
+        const MANUAL_FIREBASE_CONFIG = {
+            apiKey: "AIzaSy_REPLACE_WITH_YOUR_KEY", 
+            authDomain: "replace-with-your-auth-domain.firebaseapp.com",
+            projectId: "replace-with-your-project-id",
+            storageBucket: "replace-with-your-storage-bucket.appspot.com",
+            messagingSenderId: "REPLACE_WITH_SENDER_ID",
+            appId: "REPLACE_WITH_APP_ID"
+        };
+        const MANUAL_APP_ID = 'hosted-budget-app';
+        const MANUAL_AUTH_TOKEN = null; // We will use anonymous sign-in if running locally/hosted
+
         // --- GLOBAL VARIABLES & STATE ---
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-budget-manager-app';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // Prioritize the sandbox variables, otherwise use manual (hosted) variables.
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+                               ? JSON.parse(__firebase_config) 
+                               : MANUAL_FIREBASE_CONFIG;
+                               
+        const appId = typeof __app_id !== 'undefined' ? __app_id : MANUAL_APP_ID;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : MANUAL_AUTH_TOKEN;
 
         let db = null;
         let auth = null;
@@ -770,11 +791,23 @@
 
         /** Initialize Firebase and listeners */
         async function initializeAppAndListeners() {
-            if (Object.keys(firebaseConfig).length === 0) {
-                loadingEl.innerHTML = '<p class="text-red-500">Firebase configuration not available. Cannot load data.</p>';
+            // Check if we are using the mock config
+            if (firebaseConfig.projectId === "replace-with-your-project-id") {
+                // Display a warning that the app is using mock data/config
+                loadingEl.innerHTML = `
+                    <p class="text-red-600 font-semibold mb-3">WARNING: Mock Firebase Configuration Active</p>
+                    <p class="text-gray-600">The app will initialize, but you must replace the placeholder values in the JavaScript code with your actual Firebase project credentials for data to persist across sessions and devices.</p>
+                `;
+                
+                // Still allow the app to attempt initialization with the mock data.
+                setTimeout(() => {
+                    loadingEl.style.display = 'none';
+                    switchTab(state.currentTab);
+                }, 3000); // Give time for the warning to display
                 return;
             }
-
+            
+            // --- Standard Initialization ---
             try {
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
@@ -844,7 +877,7 @@
 
             } catch (error) {
                 console.error("Firebase Initialization Error:", error);
-                loadingEl.innerHTML = `<p class="text-red-500">Initialization failed. ${error.message}</p>`;
+                loadingEl.innerHTML = `<p class="text-red-500">Initialization failed. ${error.message}. You need to replace the Firebase config placeholders.</p>`;
             }
         }
 
