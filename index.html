@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personal Budget Manager</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Chart.js for charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <!-- Load Inter Font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+
+        /* Custom scrollbar for transaction table */
+        .scrollable-table {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+    <div id="app" class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+        <header class="mb-8">
+            <h1 class="text-4xl font-extrabold text-blue-800 tracking-tight">Financial Flow</h1>
+            <p class="text-gray-500">Real-time Personal Budget Dashboard</p>
+        </header>
+
+        <nav class="flex space-x-1 p-1 bg-white rounded-xl shadow-lg mb-8" id="nav-tabs">
+            <button data-tab="Dashboard" class="tab-button bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 shadow-md">Dashboard</button>
+            <button data-tab="Income" class="tab-button text-gray-700 hover:bg-blue-50 py-2 px-4 rounded-lg transition duration-200">Income</button>
+            <button data-tab="Expenses" class="tab-button text-gray-700 hover:bg-blue-50 py-2 px-4 rounded-lg transition duration-200">Expenses</button>
+            <button data-tab="Transactions Log" class="tab-button text-gray-700 hover:bg-blue-50 py-2 px-4 rounded-lg transition duration-200">Transactions Log</button>
+            <button data-tab="Accounts & Settings" class="tab-button text-gray-700 hover:bg-blue-50 py-2 px-4 rounded-lg transition duration-200">Accounts & Settings</button>
+        </nav>
+
+        <div id="main-content" class="bg-white p-6 rounded-xl shadow-lg min-h-[600px]">
+            <!-- Loading Indicator -->
+            <div class="text-center py-20 text-gray-500" id="loading-indicator">
+                <svg class="animate-spin h-8 w-8 text-blue-500 mx-auto mb-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Loading application data...
+            </div>
+            <!-- Content for tabs will be rendered here -->
+        </div>
+
+        <!-- Notification/Modal Area -->
+        <div id="notification-area" class="fixed bottom-4 right-4 z-50"></div>
+
+        <footer class="mt-8 text-center text-sm text-gray-400">
+            <p>User ID: <span id="user-id-display" class="font-mono text-xs"></span></p>
+            <p>Data stored in Firestore under App ID: <span id="app-id-display"></span></p>
+        </footer>
+    </div>
+
+    <!-- Firebase Imports and Application Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, addDoc, serverTimestamp, orderBy, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Enable Firestore Debug Logging
+        setLogLevel('Debug');
+
+        // --- GLOBAL VARIABLES & STATE ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-budget-manager-app';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db = null;
+        let auth = null;
+        let userId = null;
+
+        const state = {
+            transactions: [],
+            settings: {
+                accounts: ['SBI', 'HDFC', 'Paytm', 'Cash'],
+                expenseCategories: ['Food', 'Travel', 'Shopping', 'Bills', 'Others'],
+                incomeSources: ['Salary', 'Freelance', 'Refund']
+            },
+            currentTab: 'Dashboard',
+            isAuthReady: false,
+            charts: {}
+        };
+
+        const mainContentEl = document.getElementById('main-content');
+        const navTabsEl = document.getElementById('nav-tabs');
+        const loadingEl = document.getElementById('loading-indicator');
+        const userIdDisplayEl = document.getElementById('user-id-display');
+        const appIdDisplayEl = document.getElementById('app-id-display');
+
+        // --- UTILITY FUNCTIONS ---
+
+        /** Shows a temporary notification message */
+        function showNotification(message, type = 'success') {
+            const area = document.getElementById('notification-area');
+            const color = type === 'success' ? 'bg-green-500' : 'bg-red-500';
+            const html = `
+                <div class="${color} text-white p-3 mb-2 rounded-lg shadow-xl transition-opacity duration-300 opacity-0 transform translate-y-4" style="min-width: 250px;">
+                    ${message}
+                </div>
+            `;
+            area.insertAdjacentHTML('beforeend', html);
+            const newToast = area.lastElementChild;
+            setTimeout(() => { newToast.classList.remove('opacity-0', 'translate-y-4'); }, 10);
+            setTimeout(() => {
+                newToast.classList.add('opacity-0', 'translate-y-4');
+                setTimeout(() => newToast.remove(), 300);
+            }, 5000);
+        }
+
+        /** Formats a number as Indian Rupee (₹) */
+        function formatCurrency(amount) {
+            return new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR',
+                maximumFractionDigits: 0
+            }).format(amount);
+        }
+        
+        /** Utility to convert transaction data to CSV format and download */
+        function exportToCsv(filename, transactions) {
+            const separator = ',';
+            const headers = [
+                "Date", "Type", "Amount", "Account", "Category/Source", "To/From", "Notes"
+            ];
+
+            const csvContent = [
+                headers.join(separator),
+                ...transactions.map(t => [
+                    t.date,
+                    t.type,
+                    t.amount,
+                    t.account,
+                    t.categoryOrSource,
+                    // Wrap fields in quotes to handle commas within notes/toFrom
+                    `"${String(t.toFrom).replace(/"/g, '""')}"`,
+                    `"${String(t.notes).replace(/"/g, '""')}"`
+                ].join(separator))
+            ].join('\n');
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            
+            // Create a temporary link element for download
+            const link = document.createElement("a");
+            if (link.download !== undefined) { 
+                const url = URL.createObjectURL(blob);
+                link.setAttribute("href", url);
+                link.setAttribute("download", filename);
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } else {
+                showNotification("Your browser does not support automatic CSV download.", "error");
+            }
+        }
+
+
+        /** Gets the firestore document reference for settings */
+        function getSettingsRef() {
+            return doc(db, 'artifacts', appId, 'users', userId, 'budget', 'settings');
+        }
+
+        /** Gets the firestore collection reference for transactions */
+        function getTransactionsCollectionRef() {
+            return collection(db, 'artifacts', appId, 'users', userId, 'budget', 'transactions');
+        }
+
+        /** Clears the main content area */
+        function clearContent() {
+            mainContentEl.innerHTML = '';
+        }
+
+        /** Calculates summary statistics from transactions */
+        function calculateSummary(transactions) {
+            const summary = {
+                totalIncome: 0,
+                totalExpenses: 0,
+                expenseByCategory: {},
+                monthlyBalance: {} // { 'YYYY-MM': balance }
+            };
+
+            // Sort transactions chronologically for balance calculation
+            const sortedTransactions = [...transactions].sort((a, b) => {
+                const dateA = a.date instanceof Date ? a.date : new Date(a.date);
+                const dateB = b.date instanceof Date ? b.date : new Date(b.date);
+                return dateA - dateB;
+            });
+
+
+            sortedTransactions.forEach(t => {
+                const amount = Number(t.amount);
+                if (t.type === 'Income') {
+                    summary.totalIncome += amount;
+                } else if (t.type === 'Expense') {
+                    summary.totalExpenses += amount;
+
+                    // Expense by Category
+                    const category = t.categoryOrSource || 'Uncategorized';
+                    summary.expenseByCategory[category] = (summary.expenseByCategory[category] || 0) + amount;
+                }
+
+                // Monthly Balance Tracking (using only Date for simple YYYY-MM)
+                const date = new Date(t.date);
+                const yearMonth = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+                if (!summary.monthlyBalance[yearMonth]) {
+                    // Find the running balance up to the start of this month
+                    let runningBalance = 0;
+                    for (const key in summary.monthlyBalance) {
+                        if (key < yearMonth) {
+                             runningBalance += summary.monthlyBalance[key];
+                        }
+                    }
+                    summary.monthlyBalance[yearMonth] = runningBalance;
+                }
+                summary.monthlyBalance[yearMonth] += (t.type === 'Income' ? amount : -amount);
+            });
+
+            // Recalculate monthly balance as a cumulative total, properly ordered
+            const dates = Object.keys(summary.monthlyBalance).sort();
+            let cumulativeBalance = 0;
+            const finalMonthlyBalance = {};
+            
+            dates.forEach(date => {
+                // Find all transactions for this month and update cumulative
+                const monthTransactions = sortedTransactions.filter(t => {
+                    const tDate = new Date(t.date);
+                    const tYearMonth = `${tDate.getFullYear()}-${String(tDate.getMonth() + 1).padStart(2, '0')}`;
+                    return tYearMonth === date;
+                });
+                
+                let monthNet = monthTransactions.reduce((net, t) => {
+                    const amount = Number(t.amount);
+                    return net + (t.type === 'Income' ? amount : -amount);
+                }, 0);
+                
+                cumulativeBalance += monthNet;
+                finalMonthlyBalance[date] = cumulativeBalance;
+            });
+
+            // If the balance tracking logic is too complex for this utility function, 
+            // the simple version where we track the cumulative balance for the months the data exists in is sufficient.
+            summary.monthlyBalance = finalMonthlyBalance;
+            summary.currentBalance = summary.totalIncome - summary.totalExpenses;
+            
+            return summary;
+        }
+
+        // --- RENDER FUNCTIONS ---
+
+        /** Renders the Dashboard Tab */
+        function renderDashboard() {
+            clearContent();
+            if (!state.isAuthReady || !state.settings) {
+                mainContentEl.innerHTML = `<p class="text-center py-8 text-gray-500">Loading settings...</p>`;
+                return;
+            }
+
+            const summary = calculateSummary(state.transactions);
+            const { totalIncome, totalExpenses, currentBalance, expenseByCategory, monthlyBalance } = summary;
+
+            const balanceColor = currentBalance >= 0 ? 'text-green-600 bg-green-50' : 'text-red-600 bg-red-50';
+
+            mainContentEl.innerHTML = `
+                <h2 class="text-3xl font-bold text-gray-800 mb-6">Financial Overview</h2>
+
+                <!-- Summary Cards -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="bg-white p-6 rounded-xl shadow-md border-b-4 border-green-500">
+                        <p class="text-sm font-medium text-gray-500">Total Income</p>
+                        <p class="text-3xl font-extrabold text-green-600 mt-1">${formatCurrency(totalIncome)}</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-xl shadow-md border-b-4 border-red-500">
+                        <p class="text-sm font-medium text-gray-500">Total Expenses</p>
+                        <p class="text-3xl font-extrabold text-red-600 mt-1">${formatCurrency(totalExpenses)}</p>
+                    </div>
+                    <div class="p-6 rounded-xl shadow-lg border-b-4 border-blue-500 ${balanceColor}">
+                        <p class="text-sm font-medium">Current Balance</p>
+                        <p class="text-4xl font-extrabold mt-1">${formatCurrency(currentBalance)}</p>
+                    </div>
+                </div>
+
+                <!-- Charts Section -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    
+                    <!-- Expense Breakdown (Pie Chart) -->
+                    <div class="bg-white p-6 rounded-xl shadow-md">
+                        <h3 class="text-xl font-semibold mb-4 text-gray-700">Expense Breakdown by Category</h3>
+                        <div class="h-80 flex items-center justify-center">
+                            <canvas id="expensePieChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Balance Over Time (Line Chart) -->
+                    <div class="bg-white p-6 rounded-xl shadow-md">
+                        <h3 class="text-xl font-semibold mb-4 text-gray-700">Cumulative Balance Over Time</h3>
+                        <div class="h-80 flex items-center justify-center">
+                            <canvas id="balanceLineChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Render Charts after content is added to DOM
+            renderCharts(expenseByCategory, monthlyBalance);
+        }
+
+        /** Initializes Chart.js charts */
+        function renderCharts(expenseByCategory, monthlyBalance) {
+            
+            // Destroy existing charts if they exist
+            if (state.charts.expensePie) state.charts.expensePie.destroy();
+            if (state.charts.balanceLine) state.charts.balanceLine.destroy();
+
+            // --- Pie Chart (Expense Breakdown) ---
+            const pieCtx = document.getElementById('expensePieChart');
+            const pieDataLabels = Object.keys(expenseByCategory).filter(key => expenseByCategory[key] > 0);
+            const pieDataValues = pieDataLabels.map(key => expenseByCategory[key]);
+
+            if (pieCtx && pieDataValues.length > 0) {
+                 state.charts.expensePie = new Chart(pieCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: pieDataLabels,
+                        datasets: [{
+                            data: pieDataValues,
+                            backgroundColor: [
+                                '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40', '#E7E9ED', '#4F46E5', '#10B981', '#F59E0B'
+                            ],
+                            hoverOffset: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        let label = context.label || '';
+                                        if (label) { label += ': '; }
+                                        if (context.parsed !== null) { label += formatCurrency(context.parsed); }
+                                        return label;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            } else if (pieCtx) {
+                pieCtx.parentElement.innerHTML = '<p class="text-center text-gray-500">No expenses recorded yet.</p>';
+            }
+
+            // --- Line Chart (Balance Over Time) ---
+            const lineCtx = document.getElementById('balanceLineChart');
+            const lineDataLabels = Object.keys(monthlyBalance).sort();
+            const lineDataValues = lineDataLabels.map(key => monthlyBalance[key]);
+            
+            if (lineCtx && lineDataValues.length > 0) {
+                state.charts.balanceLine = new Chart(lineCtx, {
+                    type: 'line',
+                    data: {
+                        labels: lineDataLabels.map(date => {
+                            const [year, month] = date.split('-');
+                            return new Date(year, month - 1).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+                        }),
+                        datasets: [{
+                            label: 'Cumulative Balance',
+                            data: lineDataValues,
+                            fill: false,
+                            borderColor: '#3B82F6', // Blue-500
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: false,
+                                ticks: {
+                                    callback: function(value, index, ticks) {
+                                        return formatCurrency(value);
+                                    }
+                                }
+                            }
+                        },
+                        plugins: {
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        let label = context.dataset.label || '';
+                                        if (label) { label += ': '; }
+                                        if (context.parsed.y !== null) { label += formatCurrency(context.parsed.y); }
+                                        return label;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            } else if (lineCtx) {
+                lineCtx.parentElement.innerHTML = '<p class="text-center text-gray-500">Not enough data for balance trend.</p>';
+            }
+        }
+
+
+        /** Renders the Income/Expense form (type: 'Income' or 'Expense') */
+        function renderTransactionForm(type) {
+            clearContent();
+            if (!state.isAuthReady || !state.settings) return;
+
+            const isIncome = type === 'Income';
+            const title = isIncome ? 'Record New Income' : 'Record New Expense';
+            const categories = isIncome ? state.settings.incomeSources : state.settings.expenseCategories;
+            const categoryLabel = isIncome ? 'Source' : 'Category';
+            const categoryName = isIncome ? 'incomeSource' : 'expenseCategory';
+            const toForLabel = isIncome ? 'From' : 'To/For';
+            const submitText = isIncome ? 'Add Income' : 'Add Expense';
+            const colorClass = isIncome ? 'border-green-500 text-green-700' : 'border-red-500 text-red-700';
+
+            mainContentEl.innerHTML = `
+                <h2 class="text-3xl font-bold ${colorClass} mb-6">${title}</h2>
+                <form id="${type.toLowerCase()}-form" class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        
+                        <!-- Date -->
+                        <div>
+                            <label for="date" class="block text-sm font-medium text-gray-700">Date</label>
+                            <input type="date" id="date" name="date" required 
+                                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"
+                                value="${new Date().toISOString().substring(0, 10)}">
+                        </div>
+
+                        <!-- Amount (₹) -->
+                        <div>
+                            <label for="amount" class="block text-sm font-medium text-gray-700">Amount (₹)</label>
+                            <input type="number" id="amount" name="amount" required step="0.01" min="0" 
+                                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"
+                                placeholder="0.00">
+                        </div>
+
+                        <!-- Category/Source -->
+                        <div>
+                            <label for="${categoryName}" class="block text-sm font-medium text-gray-700">${categoryLabel}</label>
+                            <select id="${categoryName}" name="${categoryName}" required 
+                                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border bg-white">
+                                <option value="" disabled selected>Select ${categoryLabel}</option>
+                                ${categories.map(c => `<option value="${c}">${c}</option>`).join('')}
+                            </select>
+                        </div>
+
+                        <!-- Account -->
+                        <div>
+                            <label for="account" class="block text-sm font-medium text-gray-700">Account</label>
+                            <select id="account" name="account" required 
+                                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border bg-white">
+                                <option value="" disabled selected>Select Account</option>
+                                ${state.settings.accounts.map(a => `<option value="${a}">${a}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- To/From -->
+                    <div>
+                        <label for="toFor" class="block text-sm font-medium text-gray-700">${toForLabel} / Reference</label>
+                        <input type="text" id="toFor" name="toFor" 
+                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"
+                            placeholder="${isIncome ? 'e.g., Client X, Employer' : 'e.g., Groceries, Travel Tickets'}">
+                    </div>
+
+                    <!-- Notes -->
+                    <div>
+                        <label for="notes" class="block text-sm font-medium text-gray-700">Notes</label>
+                        <textarea id="notes" name="notes" rows="2" 
+                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"></textarea>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <button type="submit" class="w-full ${isIncome ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'} text-white font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md">
+                        ${submitText}
+                    </button>
+                </form>
+            `;
+
+            // Attach event listener for form submission
+            document.getElementById(`${type.toLowerCase()}-form`).addEventListener('submit', (e) => handleTransactionSubmit(e, type));
+        }
+
+        /** Handles Income/Expense form submission */
+        async function handleTransactionSubmit(e, type) {
+            e.preventDefault();
+            const form = e.target;
+            const isIncome = type === 'Income';
+            
+            const categoryName = isIncome ? 'incomeSource' : 'expenseCategory';
+            
+            const transactionData = {
+                date: form.date.value,
+                amount: parseFloat(form.amount.value),
+                type: type,
+                account: form.account.value,
+                categoryOrSource: form[categoryName].value,
+                toFrom: form.toFor.value || (isIncome ? 'Unknown Source' : 'Unknown Recipient'),
+                notes: form.notes.value || '',
+                timestamp: serverTimestamp()
+            };
+
+            if (isNaN(transactionData.amount) || transactionData.amount <= 0) {
+                showNotification('Please enter a valid amount.', 'error');
+                return;
+            }
+
+            try {
+                await addDoc(getTransactionsCollectionRef(), transactionData);
+                showNotification(`${type} recorded successfully! (${formatCurrency(transactionData.amount)})`);
+                // Reset form fields except date
+                form.amount.value = '';
+                form[categoryName].value = '';
+                form.account.value = '';
+                form.toFor.value = '';
+                form.notes.value = '';
+            } catch (error) {
+                console.error("Error adding document: ", error);
+                showNotification(`Error recording ${type}. See console for details.`, 'error');
+            }
+        }
+
+
+        /** Renders the Transactions Log Tab */
+        function renderTransactionsLog() {
+            clearContent();
+            if (!state.isAuthReady) return;
+
+            const transactions = [...state.transactions].sort((a, b) => {
+                const dateA = new Date(a.date);
+                const dateB = new Date(b.date);
+                if (dateA - dateB !== 0) return dateB - dateA; // Primary sort by Date (descending)
+
+                // Secondary sort by timestamp (descending) if dates are the same
+                if (a.timestamp && b.timestamp) {
+                    const tsA = a.timestamp.toDate ? a.timestamp.toDate() : new Date(a.timestamp);
+                    const tsB = b.timestamp.toDate ? b.timestamp.toDate() : new Date(b.timestamp);
+                    return tsB - tsA;
+                }
+                return 0;
+            });
+
+            mainContentEl.innerHTML = `
+                <h2 class="text-3xl font-bold text-gray-800 mb-6">Transaction Log</h2>
+                
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 space-y-2 sm:space-y-0">
+                    <p class="text-gray-500">Displaying ${transactions.length} total transactions. Sorted by Date (Newest first).</p>
+                    <button id="export-csv-btn" class="bg-blue-500 hover:bg-blue-600 text-white text-sm font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md w-full sm:w-auto">
+                        Export to CSV
+                    </button>
+                </div>
+
+                
+                <div class="bg-gray-50 rounded-lg overflow-x-auto shadow-inner scrollable-table">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-blue-50 sticky top-0 shadow-sm z-10">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Account</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category / Source</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">To / From</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Notes</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="transaction-list" class="bg-white divide-y divide-gray-200">
+                            ${transactions.map(t => {
+                                const isIncome = t.type === 'Income';
+                                const typeClass = isIncome ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
+                                return `
+                                <tr data-id="${t.id}" class="hover:bg-gray-50">
+                                    <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500">${t.date}</td>
+                                    <td class="px-6 py-3 whitespace-nowrap">
+                                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${typeClass}">
+                                            ${t.type}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-3 whitespace-nowrap text-sm font-semibold ${isIncome ? 'text-green-600' : 'text-red-600'}">
+                                        ${formatCurrency(t.amount)}
+                                    </td>
+                                    <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500">${t.account}</td>
+                                    <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500">${t.categoryOrSource}</td>
+                                    <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-900">${t.toFrom}</td>
+                                    <td class="px-6 py-3 text-sm text-gray-500 max-w-xs truncate">${t.notes}</td>
+                                    <td class="px-6 py-3 whitespace-nowrap text-sm font-medium">
+                                        <button data-id="${t.id}" class="delete-btn text-red-600 hover:text-red-900 transition duration-150">Delete</button>
+                                    </td>
+                                </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                    ${transactions.length === 0 ? '<p class="text-center py-6 text-gray-500">No transactions recorded yet.</p>' : ''}
+                </div>
+            `;
+
+            // Attach export listener
+            document.getElementById('export-csv-btn').addEventListener('click', () => {
+                const today = new Date().toISOString().substring(0, 10);
+                // Ensure the list is chronologically correct for the CSV export
+                const transactionsForExport = [...state.transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+                exportToCsv(`financial_flow_export_${today}.csv`, transactionsForExport);
+                showNotification("Data exported successfully!", "success");
+            });
+
+            // Attach delete listeners
+            mainContentEl.querySelectorAll('.delete-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const id = e.target.dataset.id;
+                    if (id) {
+                        handleDeleteTransaction(id);
+                    }
+                });
+            });
+        }
+
+        /** Handles transaction deletion */
+        async function handleDeleteTransaction(id) {
+            // Using a simple confirmation message instead of window.confirm
+            const transaction = state.transactions.find(t => t.id === id);
+            if (!transaction) return;
+
+            const confirm = document.createElement('div');
+            confirm.innerHTML = `
+                <div class="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white p-6 rounded-lg shadow-2xl max-w-sm w-full">
+                        <h3 class="text-xl font-bold mb-4">Confirm Deletion</h3>
+                        <p class="mb-4">Are you sure you want to delete this ${transaction.type} of 
+                            <span class="font-semibold">${formatCurrency(transaction.amount)}</span> from 
+                            <span class="font-semibold">${transaction.date}</span>?</p>
+                        <div class="flex justify-end space-x-3">
+                            <button id="cancel-delete" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">Cancel</button>
+                            <button id="confirm-delete" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Delete</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(confirm);
+
+            document.getElementById('cancel-delete').onclick = () => confirm.remove();
+            document.getElementById('confirm-delete').onclick = async () => {
+                confirm.remove();
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', userId, 'budget', 'transactions', id));
+                    showNotification('Transaction deleted successfully!', 'success');
+                } catch (error) {
+                    console.error("Error removing document: ", error);
+                    showNotification('Error deleting transaction.', 'error');
+                }
+            };
+        }
+
+
+        /** Renders the Accounts & Settings Tab */
+        function renderSettings() {
+            clearContent();
+            if (!state.isAuthReady) return;
+
+            const { accounts, expenseCategories, incomeSources } = state.settings;
+
+            mainContentEl.innerHTML = `
+                <h2 class="text-3xl font-bold text-gray-800 mb-6">Accounts & Settings</h2>
+                <p class="text-gray-500 mb-8">Define the lists used for dropdown menus throughout the application. Separate items with a comma (,).</p>
+
+                <form id="settings-form" class="space-y-8">
+                    
+                    <!-- Account List -->
+                    <div class="p-4 border rounded-lg shadow-sm">
+                        <label for="accounts" class="block text-xl font-semibold text-gray-700 mb-2">Account List</label>
+                        <p class="text-sm text-gray-500 mb-3">e.g., SBI, HDFC, Paytm, Cash</p>
+                        <textarea id="accounts" name="accounts" rows="3" 
+                            class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"
+                            required>${accounts.join(', ')}</textarea>
+                    </div>
+
+                    <!-- Expense Category List -->
+                    <div class="p-4 border rounded-lg shadow-sm">
+                        <label for="expenseCategories" class="block text-xl font-semibold text-gray-700 mb-2">Expense Category List</label>
+                        <p class="text-sm text-gray-500 mb-3">e.g., Food, Travel, Shopping, Bills, Others</p>
+                        <textarea id="expenseCategories" name="expenseCategories" rows="3" 
+                            class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"
+                            required>${expenseCategories.join(', ')}</textarea>
+                    </div>
+
+                    <!-- Income Source List -->
+                    <div class="p-4 border rounded-lg shadow-sm">
+                        <label for="incomeSources" class="block text-xl font-semibold text-gray-700 mb-2">Income Source List</label>
+                        <p class="text-sm text-gray-500 mb-3">e.g., Salary, Freelance, Refund, Investment</p>
+                        <textarea id="incomeSources" name="incomeSources" rows="3" 
+                            class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border"
+                            required>${incomeSources.join(', ')}</textarea>
+                    </div>
+
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 shadow-md">
+                        Save Settings
+                    </button>
+                </form>
+            `;
+
+            document.getElementById('settings-form').addEventListener('submit', handleSettingsSubmit);
+        }
+
+        /** Handles settings form submission */
+        async function handleSettingsSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+
+            const sanitizeInput = (text) => text.split(',').map(s => s.trim()).filter(s => s.length > 0);
+
+            const newSettings = {
+                accounts: sanitizeInput(form.accounts.value),
+                expenseCategories: sanitizeInput(form.expenseCategories.value),
+                incomeSources: sanitizeInput(form.incomeSources.value),
+                lastUpdated: serverTimestamp()
+            };
+
+            try {
+                // Use setDoc to overwrite/create the settings document
+                await setDoc(getSettingsRef(), newSettings);
+                showNotification('Settings saved successfully! Forms updated.');
+                // state.settings will be updated automatically by the onSnapshot listener
+            } catch (error) {
+                console.error("Error saving settings: ", error);
+                showNotification('Error saving settings.', 'error');
+            }
+        }
+
+
+        // --- APPLICATION FLOW CONTROL ---
+
+        /** Function to switch the active tab and render content */
+        function switchTab(tabName) {
+            state.currentTab = tabName;
+            
+            // Update active button styling
+            navTabsEl.querySelectorAll('.tab-button').forEach(btn => {
+                const isActive = btn.dataset.tab === tabName;
+                btn.classList.toggle('bg-blue-600', isActive);
+                btn.classList.toggle('text-white', isActive);
+                btn.classList.toggle('shadow-md', isActive);
+                btn.classList.toggle('text-gray-700', !isActive);
+                btn.classList.toggle('hover:bg-blue-50', !isActive);
+            });
+
+            // Render content based on tab
+            if (tabName === 'Dashboard') renderDashboard();
+            else if (tabName === 'Income') renderTransactionForm('Income');
+            else if (tabName === 'Expenses') renderTransactionForm('Expense');
+            else if (tabName === 'Transactions Log') renderTransactionsLog();
+            else if (tabName === 'Accounts & Settings') renderSettings();
+        }
+
+        /** Initialize Firebase and listeners */
+        async function initializeAppAndListeners() {
+            if (Object.keys(firebaseConfig).length === 0) {
+                loadingEl.innerHTML = '<p class="text-red-500">Firebase configuration not available. Cannot load data.</p>';
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                appIdDisplayEl.textContent = appId;
+                
+                // 1. Authentication
+                await new Promise(resolve => {
+                    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                        } else {
+                            if (initialAuthToken) {
+                                // Sign in with custom token if provided
+                                await signInWithCustomToken(auth, initialAuthToken);
+                                userId = auth.currentUser.uid;
+                            } else {
+                                // Fallback to anonymous sign-in
+                                await signInAnonymously(auth);
+                                userId = auth.currentUser.uid;
+                            }
+                        }
+                        userIdDisplayEl.textContent = userId;
+                        state.isAuthReady = true;
+                        loadingEl.style.display = 'none';
+                        resolve();
+                        unsubscribe(); // Stop listening after initial auth is resolved
+                    });
+                });
+
+                // 2. Settings Listener
+                onSnapshot(getSettingsRef(), (docSnapshot) => {
+                    if (docSnapshot.exists()) {
+                        state.settings = docSnapshot.data();
+                        console.log("Settings updated:", state.settings);
+                    } else {
+                        // If settings don't exist, create a default one
+                        console.log("No settings found, setting defaults...");
+                        setDoc(getSettingsRef(), state.settings, { merge: true }).catch(e => console.error("Error setting default settings:", e));
+                    }
+                    // Re-render the current tab to apply new settings (e.g., dropdowns)
+                    switchTab(state.currentTab);
+                }, (error) => {
+                    console.error("Error listening to settings:", error);
+                    showNotification("Failed to load settings from database.", 'error');
+                });
+
+                // 3. Transactions Listener
+                const q = query(getTransactionsCollectionRef(), orderBy("date", "desc"));
+                onSnapshot(q, (snapshot) => {
+                    state.transactions = snapshot.docs.map(doc => ({
+                        id: doc.id,
+                        ...doc.data()
+                    }));
+                    
+                    // Convert Firestore Timestamps to Date objects if needed, but here we just keep the simple data.
+                    // The .data() contains simple types for the fields we need.
+
+                    console.log("Transactions updated:", state.transactions.length);
+                    // Re-render the current tab to show new data
+                    switchTab(state.currentTab);
+                }, (error) => {
+                    console.error("Error listening to transactions:", error);
+                    showNotification("Failed to load transactions from database.", 'error');
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                loadingEl.innerHTML = `<p class="text-red-500">Initialization failed. ${error.message}</p>`;
+            }
+        }
+
+        // --- EVENT LISTENERS ---
+
+        // Tab switching logic
+        navTabsEl.addEventListener('click', (e) => {
+            if (e.target.classList.contains('tab-button')) {
+                const tabName = e.target.dataset.tab;
+                switchTab(tabName);
+            }
+        });
+
+        // Start the application when the window loads
+        window.onload = initializeAppAndListeners;
+    </script>
+</body>
+</html>
